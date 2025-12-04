@@ -1,0 +1,104 @@
+############# PREAMBLE #################
+# The purpose of this script is to create the main bibliometric indicators
+rm(list=ls())
+
+### LOAD PACKAGES
+# Just once per project: Install all packages and associated versions: 
+install.packages("renv")  
+renv::restore()
+
+# Load packages specific for this script:
+pacman::p_load("readxl", "openxlsx", "tidyverse", "pbapply", "bibliometrix", "stringi")
+
+######### LOAD DATA ################
+#pubdata_raw <- read.xlsx("Work Data/scopus_no_duplicates_cancer_type.xlsx")
+pubdata_raw <- read.csv("data/scopus_clean.csv", stringsAsFactors = FALSE)
+
+######## Small check on scopus data ###########
+required_vars <- c("EID", "Document.Type", "ISSN", "Year", "Cited.by")
+missing_vars <- setdiff(required_vars, names(pubdata_raw))
+
+if (length(missing_vars) > 0) {
+  stop(paste("Missing variables:", paste(missing_vars, collapse = ", ")))
+} else {
+  print("All required variables are present.")
+}
+
+############## Investigate data ################
+#######################################
+print(paste0("Number of rows: ", nrow(pubdata_raw)))
+names(pubdata_raw)
+str(pubdata_raw)
+
+
+############## RESULTS ################
+#######################################
+
+
+#### Publication Volume ####
+pub_per_year <- pubdata_raw %>%
+  group_by(Year) %>% summarise(publications = n_distinct(EID)) %>% ungroup()
+
+
+#### Research Areas ####
+sourcelist <- readRDS("data/sourcelist2020") 
+
+subjAreas <- pubdata_raw %>% 
+  select(EID, issn = ISSN) %>% 
+  left_join(select(sourcelist, issn, sjr, subjectArea), by = "issn") %>% distinct() %>% 
+  group_by(subjectArea) %>% summarise(publications = n_distinct(EID)) %>% ungroup() %>% 
+  arrange(desc(publications)) %>% na.omit
+
+
+#### Scientific Quality ####
+top_subjectareas <- subjAreas %>% 
+  mutate(cum_share = cumsum(publications)/sum(publications)) %>% 
+  filter(cum_share < 0.8) %>% 
+  summarise(n = n() + 1) %>% pull(n)
+
+top_80subjectareas <- subjAreas %>% 
+  filter(1:n() <= top_subjectareas) %>% pull(subjectArea)
+
+#Create benchmark percentiles
+sjr_benchmark <- sourcelist %>% 
+  filter(subjectArea %in% top_80subjectareas) %>% 
+  select(issn, sjr, subjectArea) %>% distinct() %>% na.omit %>% 
+  summarise(p99 = quantile(sjr, probs = 0.99),
+            p95 = quantile(sjr, probs = 0.95),
+            p90 = quantile(sjr, probs = 0.90))
+
+
+
+scientificQuality <- pubdata_raw %>% 
+  select(EID, issn = ISSN) %>% 
+  left_join(select(sourcelist, issn, sjr), by = "issn") %>% distinct() %>% 
+  cbind(sjr_benchmark) %>% 
+  mutate(top1 = ifelse(sjr >= p99, 1, 0),
+         top5 = ifelse(sjr >= p95, 1, 0),
+         top10 = ifelse(sjr >= p90, 1, 0)) %>% 
+  summarise(top1 = sum(top1, na.rm = TRUE),
+            top5 = sum(top5, na.rm = TRUE),
+            top10 = sum(top10, na.rm = TRUE)) %>% 
+  mutate(top1_share = top1/n_distinct(pubdata_raw$EID),
+         top5_share = top5/n_distinct(pubdata_raw$EID),
+         top10_share = top10/n_distinct(pubdata_raw$EID),
+         publications = n_distinct(pubdata_raw$EID))
+
+
+#### SCIENTIFIC IMPACT ####
+# Add code here for benchmark when we have data
+
+
+#### SAVE RESULTS ####
+wb_results <- createWorkbook("wb_results")
+
+writeData(wb_results, addWorksheet(wb_results, "Pub Timeline"), pub_per_year)
+writeData(wb_results, addWorksheet(wb_results, "SubjAreas"), subjAreas)
+writeData(wb_results, addWorksheet(wb_results, "ScientificQuality"), scientificQuality)
+
+date_str <- format(Sys.Date(), "%Y%m%d")
+saveWorkbook(wb_results, paste0("output/results_bibliometric_indicators_", date_str, ".xlsx"), overwrite = FALSE)
+
+
+
+
