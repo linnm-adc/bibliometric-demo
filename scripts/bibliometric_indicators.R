@@ -4,12 +4,20 @@ rm(list=ls())
 
 ### LOAD PACKAGES
 # Just once per project: Install all packages and associated versions: 
-install.packages("renv")  
-renv::restore()
+# install.packages("renv")  
+# renv::restore()
 
 # Load packages specific for this script:
 pacman::p_load("readxl", "openxlsx", "tidyverse", "pbapply", "bibliometrix", "stringi")
 
+proj_path <- rstudioapi::getActiveProject()
+proj_name <- basename(proj_path)
+
+if (proj_name == "Bibliometric demo") {
+  message("Project 'bibliometrics' is loaded. Starting script...")
+} else {
+  stop("Warning - This script must be run from the 'bibliometric demo' project")
+}
 ######### LOAD DATA ################
 #pubdata_raw <- read.xlsx("Work Data/scopus_no_duplicates_cancer_type.xlsx")
 pubdata_raw <- read.csv("data/scopus_clean.csv", stringsAsFactors = FALSE)
@@ -86,8 +94,59 @@ scientificQuality <- pubdata_raw %>%
 
 
 #### SCIENTIFIC IMPACT ####
-# Add code here for benchmark when we have data
+# Two ISSN = paper version and online version
+# Clean pubdata
+karolinska_names <- c("Karoliniska", "Karolinska Sjukhuset", "Karolinska Institute", "Karolinska Institutet", "KI", "KS")
 
+pattern <- regex(
+  paste0("\\b(", paste(karolinska_names, collapse = "|"), ")\\b"),
+  ignore_case = TRUE
+)
+
+pubdata_karolinska <- pubdata_raw %>%
+  filter(ISSN != "", ) %>%
+  mutate(Year = as.character(Year)) %>%
+  rename(issn = ISSN) %>%
+  filter(str_detect(Affiliations, pattern), Year==2023) %>%
+  select(issn, Cited.by, Year) %>%
+  separate_rows(issn, sep = ";\\s*")
+
+# Load benchmark data
+
+benchmark_data_karolinska_raw <- list.files(
+  path = "data/benchmark_karolinska/",
+  pattern = "\\.csv$",
+  full.names = TRUE
+) %>%
+  map_dfr(~ read_csv(
+    .x,
+    col_types = cols(
+      .default = col_character(),
+      `Cited by` = col_double()
+    )
+  )) %>%
+  rename(issn = ISSN) %>%
+  group_by(issn) 
+
+benchmark_data_karolinska <- benchmark_data_karolinska_raw %>%
+  reframe(publications = n_distinct(DOI),
+          citations = sum(`Cited by`, na.rm = TRUE)) %>%
+  ungroup() %>% 
+  mutate(citation_rate_benchmark = citations/publications) %>%
+  select(-citations, -publications)
+
+# Create indicators for benchmark data:
+impact <- pubdata_karolinska %>%
+  left_join(benchmark_data_karolinska, by = c("issn"), relationship = "many-to-many") %>%
+  mutate(impact_ratio = Cited.by/citation_rate_benchmark,
+         impact_ratio = ifelse(is.na(impact_ratio) & citation_rate_benchmark > 0, 0, impact_ratio),
+         impact_ratio = ifelse(is.infinite(impact_ratio), NA, impact_ratio)
+  )
+
+# Summaries
+impact_overall <- impact %>%
+  summarise(impact_ratio = mean(impact_ratio, na.rm = TRUE)) %>%
+  ungroup()
 
 #### SAVE RESULTS ####
 wb_results <- createWorkbook("wb_results")
@@ -95,6 +154,7 @@ wb_results <- createWorkbook("wb_results")
 writeData(wb_results, addWorksheet(wb_results, "Pub Timeline"), pub_per_year)
 writeData(wb_results, addWorksheet(wb_results, "SubjAreas"), subjAreas)
 writeData(wb_results, addWorksheet(wb_results, "ScientificQuality"), scientificQuality)
+writeData(wb_results, addWorksheet(wb_results, "Impact"), impact_overall)
 
 date_str <- format(Sys.Date(), "%Y%m%d")
 saveWorkbook(wb_results, paste0("output/results_bibliometric_indicators_", date_str, ".xlsx"), overwrite = FALSE)
